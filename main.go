@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"image"
 	"image/jpeg"
 	_ "image/png"
@@ -201,19 +202,31 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 
 	img, inputFormat, err := image.Decode(resp.Body)
 	if err != nil {
-		http.Error(w, "failed to decode image", http.StatusBadGateway)
+		log.Println("failed to decode image:", err)
+		http.Error(w, "failed to decode image", http.StatusBadRequest)
 		return
 	}
 
 	log.Println("decode image format:", inputFormat)
 
-	w.Header().Set("Content-Type", "image/json")
-	w.Header().Set("X-Image-Proxy-Input-Format", inputFormat)
-	w.Header().Set("X-Image-Proxy-Width", strconv.Itoa(width))
-	w.Header().Set("X-Image-Proxy-Format", format)
+	var buf bytes.Buffer
 
-	if err := jpeg.Encode(w, img, &jpeg.Options{Quality: 85});err != nil {
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
 		log.Println("failed to encode jpeg:", err)
+		http.Error(w, "failed to encode jpeg", http.StatusInternalServerError)
+		return
+	}
+
+	log.Println("encoded jpeg size:", buf.Len())
+
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	w.Header().Set("X-Image-Proxy-Input-Format", inputFormat)
+	w.Header().Set("X-Image-Proxy-Output-Format", "jpeg")
+	w.Header().Set("X-Image-Proxy-Width", strconv.Itoa(width))
+
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		log.Println("failed to write response:", err)
 	}
 }
 
