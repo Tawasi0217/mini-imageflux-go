@@ -1,8 +1,11 @@
 package main
 
 import (
+	"image"
+	"image/jpeg"
+	_ "image/png"
+	_ "image/gif"
 	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -196,12 +199,21 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 
-	w.Header().Set("Content-Type", contentType)
+	img, inputFormat, err := image.Decode(resp.Body)
+	if err != nil {
+		http.Error(w, "failed to decode image", http.StatusBadGateway)
+		return
+	}
+
+	log.Println("decode image format:", inputFormat)
+
+	w.Header().Set("Content-Type", "image/json")
+	w.Header().Set("X-Image-Proxy-Input-Format", inputFormat)
 	w.Header().Set("X-Image-Proxy-Width", strconv.Itoa(width))
 	w.Header().Set("X-Image-Proxy-Format", format)
 
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		log.Println("failed to copy image response:", err)
+	if err := jpeg.Encode(w, img, &jpeg.Options{Quality: 85});err != nil {
+		log.Println("failed to encode jpeg:", err)
 	}
 }
 
