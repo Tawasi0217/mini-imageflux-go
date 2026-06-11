@@ -45,10 +45,18 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	img, inputFormat, err := imageproc.Decode(resp.Body)
+	limitedBody := http.MaxBytesReader(w, resp.Body, fetcher.MaxImageBytes)
+
+	img, inputFormat, err := imageproc.Decode(limitedBody)
 	if err != nil {
 		log.Println("failed to decode image:", err)
-		http.Error(w, "failed to decode image", http.StatusBadRequest)
+		http.Error(w, "failed to decode image or image is too large", http.StatusBadRequest)
+		return
+	}
+
+	if err := imageproc.ValidateImageSize(img); err != nil {
+		log.Println("invalid image size:", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -62,11 +70,13 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", imageproc.ContentType(params.Format))
-	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
 	w.Header().Set("X-Image-Proxy-Input-Format", inputFormat)
+	w.Header().Set("X-Image-Proxy-Input-Width", strconv.Itoa(img.Bounds().Dx()))
+	w.Header().Set("X-Image-Proxy-Input-Height", strconv.Itoa(img.Bounds().Dy()))
 	w.Header().Set("X-Image-Proxy-Output-Format", params.Format)
-	w.Header().Set("X-Image-Proxy-Width", strconv.Itoa(params.Width))
+	w.Header().Set("X-Image-Proxy-Requested-Width", strconv.Itoa(params.Width))
+	w.Header().Set("X-Image-Proxy-Output-Width", strconv.Itoa(resized.Bounds().Dx()))
+	w.Header().Set("X-Image-Proxy-Output-Height", strconv.Itoa(resized.Bounds().Dy()))
 
 	if _, err := w.Write(buf.Bytes()); err != nil {
 		log.Println("failed to write response:", err)
