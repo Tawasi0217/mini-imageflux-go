@@ -3,13 +3,15 @@ package server
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 
+	"mini-imageflux-go/internal/fetcher"
 	"mini-imageflux-go/internal/imageproc"
 )
+
+const maxImageWidth = 4096
 
 type ImageHandler struct{}
 
@@ -35,24 +37,13 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := http.Get(params.URL)
+	resp, err := fetcher.FetchImage(params.URL)
 	if err != nil {
-		log.Println("failed to fetch origin image:", err)
-		http.Error(w, "failed to fetch origin image", http.StatusBadGateway)
+		log.Println(err)
+		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		http.Error(w, fmt.Sprintf("origin returned status: %d", resp.StatusCode), http.StatusBadGateway)
-		return
-	}
-
-	contentType := resp.Header.Get("Content-Type")
-	if contentType != "image/jpeg" && contentType != "image/png" && contentType != "image/gif" {
-		http.Error(w, "unsupported origin content-type: "+contentType, http.StatusBadRequest)
-		return
-	}
 
 	img, inputFormat, err := imageproc.Decode(resp.Body)
 	if err != nil {
@@ -65,16 +56,16 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 
 	var buf bytes.Buffer
 
-	if err := imageproc.EncodeJPEG(&buf, resized, 85); err != nil {
-		log.Println("failed to encode jpeg:", err)
-		http.Error(w, "failed to encode jpeg", http.StatusInternalServerError)
+	if err := imageproc.Encode(&buf, resized, params.Format, 85); err != nil {
+		log.Println("failed to encode image:", err)
+		http.Error(w, "failed to encode image", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Content-Type", imageproc.ContentType(params.Format))
 	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
 	w.Header().Set("X-Image-Proxy-Input-Format", inputFormat)
-	w.Header().Set("X-Image-Proxy-Output-Format", "jpeg")
+	w.Header().Set("X-Image-Proxy-Output-Format", params.Format)
 	w.Header().Set("X-Image-Proxy-Width", strconv.Itoa(params.Width))
 
 	if _, err := w.Write(buf.Bytes()); err != nil {
@@ -104,6 +95,10 @@ func parseImageParams(r *http.Request) (ImageParams, error) {
 
 	if width <= 0 {
 		return ImageParams{}, errors.New("w must be greater than 0")
+	}
+
+	if width > maxImageWidth {
+		return ImageParams{}, errors.New("w must be less than or equal to 4096")
 	}
 
 	if format == "" {
