@@ -2,23 +2,37 @@
 
 mini-imageflux-go は、Goで実装する小規模な画像変換プロキシです。
 
-指定されたオリジン画像を取得し、リサイズや形式変換を行ったうえで、変換済み画像をキャッシュして返します。  
-画像配信基盤に必要なキャッシュ設計、HTTPキャッシュヘッダ、メトリクス計測、変換処理の負荷管理を検証するためのプロジェクトです。
+指定されたオリジン画像を取得し、横幅指定でリサイズしたうえで JPEG として返します。  
+変換済み画像はディスクキャッシュへ保存し、同一条件のリクエストでは再変換を行わずにキャッシュから返します。
+
+画像配信基盤に必要な以下の要素を、小規模な実装として検証するためのプロジェクトです。
+
+- 画像取得
+- 画像デコード
+- リサイズ
+- JPEG エンコード
+- ディスクキャッシュ
+- HTTP キャッシュヘッダ
+- ETag
+- メトリクス計測
+- URL検証
+- 巨大画像対策
 
 ## Goals
 
-このプロジェクトでは、以下の要素を小規模に実装・検証します。
+このプロジェクトでは、画像変換プロキシを題材に、以下の要素を実装・検証します。
 
 - オリジン画像を取得する
-- リクエストパラメータに応じて画像を変換する
-- 同一条件の変換結果をキャッシュする
-- HTTPキャッシュヘッダを付与する
-- レイテンシ、エラー率、キャッシュヒット率を計測する
-- 高負荷時や異常入力時の課題を把握する
+- リクエストパラメータに応じて画像をリサイズする
+- 変換済み画像をディスクキャッシュする
+- `Cache-Control` と `ETag` を付与する
+- キャッシュヒット率、エラー数、レスポンス時間を計測する
+- 不正なURLや巨大画像に対する基本的な制限を入れる
+- キャッシュの有無による応答時間の差を観測する
 
 ## Motivation
 
-画像配信では、単に元画像をそのまま返すだけではなく、用途に応じたリサイズ、形式変換、キャッシュ制御、変換コストの管理、メトリクス計測が重要になります。
+画像配信では、元画像をそのまま返すだけではなく、用途に応じたリサイズ、形式変換、キャッシュ制御、変換コストの管理、メトリクス計測が重要になります。
 
 特に画像変換を伴う配信では、以下のような設計上の論点があります。
 
@@ -35,40 +49,54 @@ mini-imageflux-go は、Goで実装する小規模な画像変換プロキシで
 
 現在の実装状況です。
 
-- [ ] Go による HTTP サーバー
-- [ ] URL 指定によるオリジン画像取得
-- [ ] 画像リサイズ
-- [ ] JPEG 出力
+- [x] Go による HTTP サーバー
+- [x] `/image` エンドポイント
+- [x] URL 指定によるオリジン画像取得
+- [x] JPEG / PNG / GIF 入力のデコード
+- [x] 横幅指定によるアスペクト比維持リサイズ
+- [x] JPEG 出力
 - [ ] WebP 出力
-- [ ] ディスクキャッシュ
-- [ ] `Cache-Control` ヘッダ
-- [ ] `ETag` 対応
-- [ ] `/metrics` エンドポイント
-- [ ] キャッシュヒット数・ミス数の計測
-- [ ] レスポンス時間の計測
+- [x] ディスクキャッシュ
+- [x] `Cache-Control` ヘッダ
+- [x] `ETag` 対応
+- [x] `/metrics` エンドポイント
+- [x] キャッシュヒット数・ミス数の計測
+- [x] キャッシュヒット率の計測
+- [x] エラー数の計測
+- [x] レスポンス時間の計測
+- [x] キャッシュHIT/MISS別の平均処理時間計測
+- [x] HTTPクライアントのタイムアウト
+- [x] Content-Length による取得サイズ制限
+- [x] 実読み取り量制限
+- [x] デコード後のピクセル数上限
+- [x] オリジンURL検証
+- [x] リダイレクト先URL検証
 - [ ] ベンチマーク結果の記録
 - [ ] nginx reverse proxy 構成
 - [ ] URL 署名
-- [ ] 巨大画像対策
 
 ## Architecture
 
-基本構成は以下の通りです。
+現在の基本構成は以下の通りです。
 
 ```txt
 Client
   |
-  | HTTP Request
+  | GET /image?url=...&w=...&format=jpeg
   v
 Go Image Proxy
   |
-  | 1. Generate cache key
-  | 2. Check converted image cache
-  | 3. Fetch origin image if cache miss
-  | 4. Decode image
-  | 5. Resize / convert format
-  | 6. Store converted image to cache
-  | 7. Return response with cache headers
+  | 1. Validate request parameters
+  | 2. Generate cache key
+  | 3. Check disk cache
+  | 4. Return cached image if cache hit
+  | 5. Fetch origin image if cache miss
+  | 6. Decode image
+  | 7. Validate decoded image size
+  | 8. Resize image by width
+  | 9. Encode as JPEG
+  | 10. Store converted image to disk cache
+  | 11. Return response with cache headers
   v
 Disk Cache
   |
@@ -97,14 +125,18 @@ Disk Cache / Origin
 
 1. クライアントが変換条件付きでリクエストを送信する
 2. リクエストパラメータを検証する
-3. オリジンURL、出力サイズ、出力形式などからキャッシュキーを生成する
-4. 変換済み画像がキャッシュに存在する場合は、それを返す
+3. オリジンURL、出力幅、出力形式、品質設定からキャッシュキーを生成する
+4. 変換済み画像がディスクキャッシュに存在する場合は、キャッシュから返す
 5. キャッシュが存在しない場合は、オリジン画像を取得する
-6. 画像をデコードする
-7. 指定された条件に従ってリサイズ・形式変換を行う
-8. 変換後の画像をキャッシュに保存する
-9. HTTPキャッシュヘッダを付与してレスポンスを返す
-10. 処理時間、キャッシュヒット率、エラー数などをメトリクスに記録する
+6. オリジンURLとリダイレクト先URLを検証する
+7. Content-Length と実読み取り量を制限する
+8. 画像をデコードする
+9. デコード後のピクセル数を検証する
+10. 指定された横幅に合わせてアスペクト比を維持したままリサイズする
+11. JPEGとしてエンコードする
+12. 変換後の画像をディスクキャッシュへ保存する
+13. `Cache-Control` と `ETag` を付与してレスポンスを返す
+14. リクエスト数、キャッシュヒット率、エラー数、処理時間をメトリクスに記録する
 
 ## API
 
@@ -117,16 +149,24 @@ GET /image?url={origin_url}&w={width}&format={format}
 ### Example
 
 ```txt
-GET /image?url=https://example.com/sample.jpg&w=512&format=webp
+GET /image?url=https://example.com/sample.png&w=512&format=jpeg
 ```
 
 ### Parameters
 
-| Parameter | Description | Example |
-|---|---|---|
-| `url` | オリジン画像のURL | `https://example.com/sample.jpg` |
-| `w` | 出力画像の横幅 | `512` |
-| `format` | 出力形式 | `jpeg`, `webp` |
+| Parameter | Description | Example | Current support |
+|---|---|---:|---|
+| `url` | オリジン画像のURL | `https://example.com/sample.png` | required |
+| `w` | 出力画像の横幅 | `512` | required, `1` - `4096` |
+| `format` | 出力形式 | `jpeg` | currently `jpeg` only |
+
+### Supported formats
+
+| Direction | Format |
+|---|---|
+| Input decode | JPEG, PNG, GIF |
+| Output encode | JPEG |
+| Future work | WebP, AVIF |
 
 ## Cache Strategy
 
@@ -142,7 +182,7 @@ GET /image?url=https://example.com/sample.jpg&w=512&format=webp
 例:
 
 ```txt
-sha256(origin_url + width + format + quality)
+sha256(url={origin_url}&w={width}&format={format}&q={quality})
 ```
 
 同じオリジン画像であっても、変換条件が異なる場合は別のキャッシュとして扱います。
@@ -151,61 +191,106 @@ sha256(origin_url + width + format + quality)
 
 キャッシュヒット時は、オリジン画像の取得、画像デコード、リサイズ、エンコードを行わず、保存済みの変換結果を返します。
 
+レスポンスには以下のようなヘッダを付与します。
+
+```txt
+X-Image-Proxy-Cache: HIT
+```
+
 ### Cache Miss
 
 キャッシュミス時は、オリジン画像を取得し、指定された条件で変換を行った後、変換済み画像をキャッシュへ保存します。
+
+```txt
+X-Image-Proxy-Cache: MISS
+```
 
 ## HTTP Cache Headers
 
 変換結果には、ブラウザやCDNでのキャッシュを想定してHTTPキャッシュヘッダを付与します。
 
-想定しているヘッダ例:
+現在付与しているヘッダ例:
 
 ```txt
 Cache-Control: public, max-age=31536000, immutable
-ETag: "{hash}"
+ETag: "{sha256_of_converted_image}"
 ```
 
-変換条件がURLに含まれる設計であれば、同一URLに対するレスポンスは基本的に不変として扱えます。  
-そのため、長めの `max-age` や `immutable` の利用を検討します。
+`ETag` は変換後画像のバイト列から生成します。  
+クライアントが `If-None-Match` を送信し、ETagが一致した場合は `304 Not Modified` を返します。
+
+現時点では、ETag判定のために変換処理が走るケースがあります。  
+ただしディスクキャッシュにヒットした場合は、キャッシュ済みファイルからETagを生成して判定できます。
+
+## Safety Checks
+
+画像プロキシでは `url` パラメータで任意のURLを指定できるため、最低限の安全性チェックを実装しています。
+
+現在の実装内容は以下です。
+
+- `http` / `https` 以外のスキームを拒否
+- `localhost` を拒否
+- loopback IP を拒否
+- unspecified IP を拒否
+- リダイレクト先URLも検証
+- リダイレクト回数を制限
+- HTTPクライアントにタイムアウトを設定
+- `Content-Length` が上限を超える画像を拒否
+- `http.MaxBytesReader` による実読み取り量制限
+- デコード後のピクセル数上限
+- 出力幅 `w` の上限
+
+この実装は基本的な防御であり、完全なSSRF対策ではありません。  
+DNS解決後のプライベートIP判定や、より厳密なリダイレクト制御は今後の課題です。
 
 ## Metrics
 
-`/metrics` エンドポイントで、以下のような値を確認できるようにします。
+`/metrics` エンドポイントで、Prometheus text formatに近い形式のメトリクスを返します。
+
+現在確認できる値は以下です。
 
 - 総リクエスト数
-- 変換成功数
-- 変換失敗数
 - キャッシュヒット数
 - キャッシュミス数
 - キャッシュヒット率
-- レスポンス時間
-- オリジン取得時間
-- 画像変換時間
+- エラー数
+- レスポンス時間の合計
+- レスポンス時間の平均
+- キャッシュHIT時の平均処理時間
+- キャッシュMISS時の平均処理時間
 
 出力例:
 
 ```txt
-image_proxy_requests_total 120
-image_proxy_cache_hits_total 85
-image_proxy_cache_misses_total 35
-image_proxy_errors_total 2
+image_proxy_requests_total 14
+image_proxy_cache_hits_total 13
+image_proxy_cache_misses_total 1
+image_proxy_cache_hit_rate 0.9286
+image_proxy_errors_total 0
+image_proxy_response_time_seconds_total 0.316298
+image_proxy_response_time_seconds_avg 0.022593
+image_proxy_cache_hit_response_time_seconds_avg 0.000319
+image_proxy_cache_miss_response_time_seconds_avg 0.312152
 ```
+
+この例では、キャッシュHIT時の平均処理時間は約0.319ms、キャッシュMISS時の平均処理時間は約312msです。  
+キャッシュによって、オリジン取得・画像デコード・リサイズ・エンコードを省略できていることが分かります。
 
 ## Benchmark
 
-キャッシュの有無によるレイテンシ差を測定する予定です。
+現在は `/metrics` による簡易計測まで実装しています。  
+今後、`hey` などのHTTP負荷試験ツールを使って、キャッシュの有無によるレイテンシ差を測定します。
 
-| Condition | p50 | p95 | Notes |
-|---|---:|---:|---|
-| First request | TBD | TBD | origin fetch + resize + encode |
-| Cache hit | TBD | TBD | disk cache |
-| WebP conversion | TBD | TBD | encode cost included |
+| Condition | Avg | Notes |
+|---|---:|---|
+| Cache miss | 0.312152s | origin fetch + decode + resize + encode + cache write |
+| Cache hit | 0.000319s | disk cache |
+| WebP conversion | TBD | future work |
 
-測定には `hey` などのHTTP負荷試験ツールを利用します。
+測定例:
 
 ```bash
-hey -n 100 -c 10 "http://localhost:8080/image?url=https://example.com/sample.jpg&w=512&format=jpeg"
+hey -n 100 -c 10 "http://localhost:8080/image?url=https://example.com/sample.png&w=512&format=jpeg"
 ```
 
 ## Getting Started
@@ -226,19 +311,26 @@ go run ./cmd/server
 ### Example Request
 
 ```bash
-curl "http://localhost:8080/image?url=https://example.com/sample.jpg&w=512&format=jpeg" -o output.jpg
+curl "http://localhost:8080/image?url=https://example.com/sample.png&w=512&format=jpeg" -o output.jpg
+```
+
+### Metrics
+
+```bash
+curl "http://localhost:8080/metrics"
 ```
 
 ## Tech Stack
 
 - Go
 - `net/http`
+- `image`
 - `image/jpeg`
 - `image/png`
-- WebP encoder
+- `image/gif`
+- `golang.org/x/image/draw`
 - Disk cache
-- Prometheus format metrics
-- nginx
+- Prometheus-like text metrics
 
 ## Directory Structure
 
@@ -249,57 +341,75 @@ mini-imageflux-go/
       main.go
   internal/
     cache/
+      disk.go
     fetcher/
+      fetcher.go
+      url_validate.go
     imageproc/
+      decode.go
+      encode.go
+      resize.go
+      size_validate.go
     metrics/
+      metrics.go
     server/
-  docs/
-    design.md
-    benchmark.md
+      handler.go
+      metrics_handler.go
   README.md
   go.mod
+  go.sum
 ```
 
 ## Current Status
 
-このプロジェクトは現在開発初期段階です。
+このプロジェクトは、画像変換プロキシの基本MVPを実装済みです。
 
-短期的には、以下のMVPを実装します。
+現在できることは以下です。
 
 - URLから画像を取得する
+- JPEG / PNG / GIF をデコードする
 - 横幅指定でリサイズする
-- JPEG / WebPで返す
+- JPEGで返す
 - 変換済み画像をディスクキャッシュする
+- `Cache-Control` と `ETag` を返す
 - `/metrics` で基本的なメトリクスを返す
-- READMEに設計・計測結果を記録する
+- キャッシュHIT/MISS別の応答時間を確認する
+- URL検証と画像サイズ制限を行う
+
+次の段階では、ベンチマーク結果の記録、READMEの説明強化、WebP対応の検討を行います。
 
 ## Known Issues
 
-現時点で想定している課題は以下です。
+現時点で把握している課題は以下です。
 
-- オリジンURLの検証が不十分
-- SSRF対策が必要
-- 巨大画像によるメモリ使用量増大への対策が必要
+- WebP / AVIF 変換は未対応
 - キャッシュ削除ポリシーが未実装
 - 同一画像への同時リクエスト時に重複変換が発生する可能性がある
-- WebP / AVIF変換時のCPU負荷をまだ測定できていない
-- オリジン取得失敗時のリトライ・タイムアウト設計が未整理
-- キャッシュ破損時の扱いが未実装
+- DNS解決後のプライベートIP判定は未実装
+- キャッシュ破損時の扱いが簡易的
+- オリジン取得失敗時のリトライ設計が未実装
+- PNG / GIF の透過情報をJPEG出力時に十分考慮していない
+- アニメーションGIFは静止画として扱われる可能性がある
+- HEADリクエストには未対応
+- 本格的なベンチマークは未実施
 
 ## Future Work
 
-今後は以下の機能を追加する予定です。
+今後は以下の機能を追加・検証する予定です。
 
+- WebP出力
+- AVIF対応
 - nginx reverse proxy構成
 - nginx proxy cacheの検証
 - URL署名
 - 期限付きURL
-- AVIF対応
 - Range Request対応
 - worker poolによる変換処理制御
 - rate limit
 - pprofによるCPU / memory profiling
 - Prometheus / Grafanaによる可視化
+- DNS解決後のSSRF対策強化
+- キャッシュ削除ポリシー
 - TypeScript / Vueによる簡易管理画面
 
 ## Notes
