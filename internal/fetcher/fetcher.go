@@ -14,6 +14,10 @@ var httpClient = &http.Client{
 }
 
 func FetchImage(originURL string) (*http.Response, error) {
+	if err := ValidateOriginURL(originURL); err != nil {
+		return nil, err
+	}
+
 	resp, err := httpClient.Get(originURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch origin image: %w", err)
