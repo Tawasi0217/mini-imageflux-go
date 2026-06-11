@@ -2,19 +2,23 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"image"
 	"log"
 	"net/http"
 	"strconv"
-	"image"
-	"crypto/sha256"
-	"encoding/hex"
 
+	"mini-imageflux-go/internal/cache"
 	"mini-imageflux-go/internal/fetcher"
 	"mini-imageflux-go/internal/imageproc"
 )
 
-const maxImageWidth = 4096
+const (
+	maxImageWidth = 4096
+	jpegQuality   = 85
+)
 
 type ImageHandler struct{}
 
@@ -38,6 +42,44 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	cacheKey := cache.GenerateKey(cache.KeyParams{
+		URL:     params.URL,
+		Width:   params.Width,
+		Format:  params.Format,
+		Quality: jpegQuality,
+	})
+
+	cachePath := cache.Path(cacheKey, params.Format)
+
+	if cache.Exists(cachePath) {
+		data, err := cache.Read(cachePath)
+		if err != nil {
+			log.Println("failed to read cache:", err)
+		} else {
+			etag := generateETag(data)
+
+			if r.Header.Get("If-None-Match") == etag {
+				w.Header().Set("ETag", etag)
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				w.Header().Set("X-Image-Proxy-Cache", "HIT")
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+
+			w.Header().Set("Content-Type", imageproc.ContentType(params.Format))
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			w.Header().Set("ETag", etag)
+			w.Header().Set("X-Image-Proxy-Cache", "HIT")
+
+			if _, err := w.Write(data); err != nil {
+				log.Println("failed to write cached response:", err)
+			}
+
+			return
+		}
 	}
 
 	resp, err := fetcher.FetchImage(params.URL)
@@ -67,24 +109,31 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 
 	var buf bytes.Buffer
 
-	if err := imageproc.Encode(&buf, resized, params.Format, 85); err != nil {
-	log.Println("failed to encode image:", err)
-	http.Error(w, "failed to encode image", http.StatusInternalServerError)
-	return
+	if err := imageproc.Encode(&buf, resized, params.Format, jpegQuality); err != nil {
+		log.Println("failed to encode image:", err)
+		http.Error(w, "failed to encode image", http.StatusInternalServerError)
+		return
 	}
 
-	etag := generateETag(buf.Bytes())
+	data := buf.Bytes()
+	etag := generateETag(data)
+
+	if err := cache.Write(cachePath, data); err != nil {
+		log.Println("failed to write cache:", err)
+	}
 
 	if r.Header.Get("If-None-Match") == etag {
 		w.Header().Set("ETag", etag)
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("X-Image-Proxy-Cache", "MISS")
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 
-	setImageResponseHeaders(w, params, inputFormat, img, resized, buf.Len(), etag)
+	setImageResponseHeaders(w, params, inputFormat, img, resized, len(data), etag)
+	w.Header().Set("X-Image-Proxy-Cache", "MISS")
 
-	if _, err := w.Write(buf.Bytes()); err != nil {
+	if _, err := w.Write(data); err != nil {
 		log.Println("failed to write response:", err)
 	}
 }
@@ -97,7 +146,7 @@ func setImageResponseHeaders(
 	outputImage image.Image,
 	contentLength int,
 	etag string,
-	) {
+) {
 	w.Header().Set("Content-Type", imageproc.ContentType(params.Format))
 	w.Header().Set("Content-Length", strconv.Itoa(contentLength))
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
