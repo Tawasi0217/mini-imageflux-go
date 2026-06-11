@@ -1,6 +1,7 @@
 package main
 
 import (
+	"golang.org/x/image/draw"
 	"bytes"
 	"image"
 	"image/jpeg"
@@ -209,9 +210,14 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("decode image format:", inputFormat)
 
+	resized := resizeByWidth(img, width)
+
+	log.Println("original bounds:", img.Bounds())
+	log.Println("resized bounds:", resized.Bounds())
+
 	var buf bytes.Buffer
 
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
+	if err := jpeg.Encode(&buf, resized, &jpeg.Options{Quality: 85}); err != nil {
 		log.Println("failed to encode jpeg:", err)
 		http.Error(w, "failed to encode jpeg", http.StatusInternalServerError)
 		return
@@ -230,7 +236,35 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func resizeByWidth(img image.Image, targetWidth int) image.Image {
+	bounds := img.Bounds()
 
+	originalWidth := bounds.Dx()
+	originalHeight := bounds.Dy()
+
+	if targetWidth <= 0 {
+		return img
+	}
+
+	if targetWidth == originalWidth {
+		return img
+	}
+
+	targetHeight := originalHeight * targetWidth / originalWidth
+
+	dst := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
+
+	draw.CatmullRom.Scale(
+		dst,
+		dst.Bounds(),
+		img,
+		bounds,
+		draw.Over,
+		nil,
+	)
+
+	return dst
+}
 
 func main() {
 	mux := http.NewServeMux()
