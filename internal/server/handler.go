@@ -6,6 +6,9 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"image"
+	"crypto/sha256"
+	"encoding/hex"
 
 	"mini-imageflux-go/internal/fetcher"
 	"mini-imageflux-go/internal/imageproc"
@@ -65,22 +68,48 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 
 	if err := imageproc.Encode(&buf, resized, params.Format, 85); err != nil {
-		log.Println("failed to encode image:", err)
-		http.Error(w, "failed to encode image", http.StatusInternalServerError)
+	log.Println("failed to encode image:", err)
+	http.Error(w, "failed to encode image", http.StatusInternalServerError)
+	return
+	}
+
+	etag := generateETag(buf.Bytes())
+
+	if r.Header.Get("If-None-Match") == etag {
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 
-	w.Header().Set("X-Image-Proxy-Input-Format", inputFormat)
-	w.Header().Set("X-Image-Proxy-Input-Width", strconv.Itoa(img.Bounds().Dx()))
-	w.Header().Set("X-Image-Proxy-Input-Height", strconv.Itoa(img.Bounds().Dy()))
-	w.Header().Set("X-Image-Proxy-Output-Format", params.Format)
-	w.Header().Set("X-Image-Proxy-Requested-Width", strconv.Itoa(params.Width))
-	w.Header().Set("X-Image-Proxy-Output-Width", strconv.Itoa(resized.Bounds().Dx()))
-	w.Header().Set("X-Image-Proxy-Output-Height", strconv.Itoa(resized.Bounds().Dy()))
+	setImageResponseHeaders(w, params, inputFormat, img, resized, buf.Len(), etag)
 
 	if _, err := w.Write(buf.Bytes()); err != nil {
 		log.Println("failed to write response:", err)
 	}
+}
+
+func setImageResponseHeaders(
+	w http.ResponseWriter,
+	params ImageParams,
+	inputFormat string,
+	inputImage image.Image,
+	outputImage image.Image,
+	contentLength int,
+	etag string,
+	) {
+	w.Header().Set("Content-Type", imageproc.ContentType(params.Format))
+	w.Header().Set("Content-Length", strconv.Itoa(contentLength))
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("ETag", etag)
+
+	w.Header().Set("X-Image-Proxy-Input-Format", inputFormat)
+	w.Header().Set("X-Image-Proxy-Input-Width", strconv.Itoa(inputImage.Bounds().Dx()))
+	w.Header().Set("X-Image-Proxy-Input-Height", strconv.Itoa(inputImage.Bounds().Dy()))
+	w.Header().Set("X-Image-Proxy-Output-Format", params.Format)
+	w.Header().Set("X-Image-Proxy-Requested-Width", strconv.Itoa(params.Width))
+	w.Header().Set("X-Image-Proxy-Output-Width", strconv.Itoa(outputImage.Bounds().Dx()))
+	w.Header().Set("X-Image-Proxy-Output-Height", strconv.Itoa(outputImage.Bounds().Dy()))
 }
 
 func parseImageParams(r *http.Request) (ImageParams, error) {
@@ -124,4 +153,9 @@ func parseImageParams(r *http.Request) (ImageParams, error) {
 		Width:  width,
 		Format: format,
 	}, nil
+}
+
+func generateETag(data []byte) string {
+	hash := sha256.Sum256(data)
+	return `"` + hex.EncodeToString(hash[:]) + `"`
 }

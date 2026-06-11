@@ -11,6 +11,17 @@ const MaxImageBytes = 10 * 1024 * 1024 // 10MB
 
 var httpClient = &http.Client{
 	Timeout: 10 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return fmt.Errorf("too many redirects")
+		}
+
+		if err := ValidateOriginURL(req.URL.String()); err != nil {
+			return fmt.Errorf("redirect URL is not allowed: %w", err)
+		}
+
+		return nil
+	},
 }
 
 func FetchImage(originURL string) (*http.Response, error) {
