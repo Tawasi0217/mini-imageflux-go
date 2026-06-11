@@ -9,10 +9,12 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"mini-imageflux-go/internal/cache"
 	"mini-imageflux-go/internal/fetcher"
 	"mini-imageflux-go/internal/imageproc"
+	"mini-imageflux-go/internal/metrics"
 )
 
 const (
@@ -33,6 +35,15 @@ func NewImageHandler() *ImageHandler {
 }
 
 func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer func() {
+		metrics.AddResponseTimeNanoseconds(time.Since(start).Nanoseconds())
+	}()
+
+	metrics.AddCacheHitResponseTimeNanoseconds(time.Since(start).Nanoseconds())
+
+	metrics.IncRequests()
+
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -40,6 +51,7 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 
 	params, err := parseImageParams(r)
 	if err != nil {
+		metrics.IncErrors()
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -58,9 +70,13 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Println("failed to read cache:", err)
 		} else {
+			metrics.IncCacheHits()
+
 			etag := generateETag(data)
 
 			if r.Header.Get("If-None-Match") == etag {
+				metrics.AddCacheHitResponseTimeNanoseconds(time.Since(start).Nanoseconds())
+
 				w.Header().Set("ETag", etag)
 				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 				w.Header().Set("X-Image-Proxy-Cache", "HIT")
@@ -74,6 +90,8 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("ETag", etag)
 			w.Header().Set("X-Image-Proxy-Cache", "HIT")
 
+			metrics.AddCacheHitResponseTimeNanoseconds(time.Since(start).Nanoseconds())
+
 			if _, err := w.Write(data); err != nil {
 				log.Println("failed to write cached response:", err)
 			}
@@ -81,9 +99,11 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	metrics.IncCacheMisses()
 
 	resp, err := fetcher.FetchImage(params.URL)
 	if err != nil {
+		metrics.IncErrors()
 		log.Println(err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -94,12 +114,14 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 
 	img, inputFormat, err := imageproc.Decode(limitedBody)
 	if err != nil {
+		metrics.IncErrors()
 		log.Println("failed to decode image:", err)
 		http.Error(w, "failed to decode image or image is too large", http.StatusBadRequest)
 		return
 	}
 
 	if err := imageproc.ValidateImageSize(img); err != nil {
+		metrics.IncErrors()
 		log.Println("invalid image size:", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -110,6 +132,7 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 
 	if err := imageproc.Encode(&buf, resized, params.Format, jpegQuality); err != nil {
+		metrics.IncErrors()
 		log.Println("failed to encode image:", err)
 		http.Error(w, "failed to encode image", http.StatusInternalServerError)
 		return
@@ -123,6 +146,8 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Header.Get("If-None-Match") == etag {
+		metrics.AddCacheMissResponseTimeNanoseconds(time.Since(start).Nanoseconds())
+
 		w.Header().Set("ETag", etag)
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		w.Header().Set("X-Image-Proxy-Cache", "MISS")
@@ -132,6 +157,8 @@ func (h *ImageHandler) HandleImage(w http.ResponseWriter, r *http.Request) {
 
 	setImageResponseHeaders(w, params, inputFormat, img, resized, len(data), etag)
 	w.Header().Set("X-Image-Proxy-Cache", "MISS")
+
+	metrics.AddCacheMissResponseTimeNanoseconds(time.Since(start).Nanoseconds())
 
 	if _, err := w.Write(data); err != nil {
 		log.Println("failed to write response:", err)

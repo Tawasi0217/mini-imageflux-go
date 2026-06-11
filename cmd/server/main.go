@@ -12,6 +12,7 @@ func main() {
 
 	imageHandler := server.NewImageHandler()
 	mux.HandleFunc("/image", imageHandler.HandleImage)
+	mux.HandleFunc("/metrics", server.HandleMetrics)
 
 	log.Println("server started at http://localhost:8080")
 
